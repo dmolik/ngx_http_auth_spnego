@@ -1,7 +1,7 @@
-=================================
 Repository information
+=================================
 
-This repository is a fork of https://github.com/stnoonan/spnego-http-auth-nginx-module which now is in inactive state. I will try to mantain it in a good condition since I use it in a lot of production services.
+This repository is a fork of https://github.com/stnoonan/spnego-http-auth-nginx-module which now is in kind of inactive state. I will try to mantain it in a good condition since I use it in a lot of production services.
 
 Nginx module for HTTP SPNEGO auth
 =================================
