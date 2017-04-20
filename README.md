@@ -16,7 +16,7 @@ Prerequisites
 
 Authentication has been tested with (at least) the following:
 
-* Nginx 1.2 through 1.7
+* Nginx 1.2 through 1.11
 * Internet Explorer 8 and above
 * Firefox 10 and above
 * Chrome 20 and above
