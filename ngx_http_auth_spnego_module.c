@@ -61,6 +61,11 @@ static void *ngx_http_auth_spnego_create_loc_conf(ngx_conf_t *);
 static char *ngx_http_auth_spnego_merge_loc_conf(
         ngx_conf_t *, void *, void *);
 static ngx_int_t ngx_http_auth_spnego_init(ngx_conf_t *);
+static ngx_int_t ngx_http_auth_preconf(ngx_conf_t *);
+
+static ngx_int_t
+ngx_http_auth_spnego_get_krb5ccname(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 
 ngx_int_t
 ngx_http_auth_spnego_set_bogus_authorization(ngx_http_request_t * r);
@@ -103,6 +108,7 @@ typedef struct {
     ngx_int_t head; /* non-zero flag if headers set */
     ngx_int_t ret; /* current return code */
     ngx_str_t token_out_b64; /* base64 encoded output tokent */
+    ngx_str_t krb5ccname;
 } ngx_http_auth_spnego_ctx_t;
 
 typedef struct {
@@ -113,6 +119,8 @@ typedef struct {
     ngx_flag_t fqun;
     ngx_flag_t force_realm;
     ngx_flag_t allow_basic;
+    ngx_flag_t save;
+    ngx_str_t temp_path;
     ngx_array_t *auth_princs;
 } ngx_http_auth_spnego_loc_conf_t;
 
@@ -180,12 +188,38 @@ static ngx_command_t ngx_http_auth_spnego_commands[] = {
         offsetof(ngx_http_auth_spnego_loc_conf_t, auth_princs),
         NULL},
 
+    {ngx_string("auth_gss_save"),
+        SPNEGO_NGX_CONF_FLAGS,
+        ngx_conf_set_flag_slot,
+        NGX_HTTP_LOC_CONF_OFFSET,
+        offsetof(ngx_http_auth_spnego_loc_conf_t, save),
+        NULL},
+
+    {ngx_string("auth_gss_temp_path"),
+        SPNEGO_NGX_CONF_FLAGS,
+        ngx_conf_set_str_slot,
+        NGX_HTTP_LOC_CONF_OFFSET,
+        offsetof(ngx_http_auth_spnego_loc_conf_t, temp_path),
+        NULL},
+
     ngx_null_command
+};
+
+/* Variable */
+static ngx_http_variable_t  ngx_http_auth_spnego_vars[] = {
+
+    { ngx_string("KRB5CCNAME"),
+      NULL,
+      ngx_http_auth_spnego_get_krb5ccname,
+      0, NGX_HTTP_VAR_NOCACHEABLE, 0
+    },
+
+    { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
 /* Module Context */
 static ngx_http_module_t ngx_http_auth_spnego_module_ctx = {
-    NULL, /* preconf */
+    ngx_http_auth_preconf, /* preconf */
     ngx_http_auth_spnego_init, /* postconf */
     NULL, /* create main conf (defaults) */
     NULL, /* init main conf (what's in nginx.conf) */
@@ -230,6 +264,7 @@ ngx_http_auth_spnego_create_loc_conf(
     conf->force_realm = NGX_CONF_UNSET;
     conf->allow_basic = NGX_CONF_UNSET;
     conf->auth_princs = NGX_CONF_UNSET_PTR;
+    conf->save = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -250,11 +285,13 @@ ngx_http_auth_spnego_merge_loc_conf(
     ngx_conf_merge_str_value(conf->keytab, prev->keytab,
             "/etc/krb5.keytab");
     ngx_conf_merge_str_value(conf->srvcname, prev->srvcname, "");
+    ngx_conf_merge_str_value(conf->temp_path, prev->temp_path, "/tmp");
 
     ngx_conf_merge_off_value(conf->fqun, prev->fqun, 0);
     ngx_conf_merge_off_value(conf->force_realm, prev->force_realm, 0);
     ngx_conf_merge_off_value(conf->allow_basic, prev->allow_basic, 1);
     ngx_conf_merge_ptr_value(conf->auth_princs, prev->auth_princs, NGX_CONF_UNSET_PTR);
+    ngx_conf_merge_off_value(conf->save, prev->save, 1);
 
 #if (NGX_DEBUG)
     ngx_conf_log_error(NGX_LOG_INFO, cf, 0, "auth_spnego: protect = %i",
@@ -273,6 +310,10 @@ ngx_http_auth_spnego_merge_loc_conf(
             conf->allow_basic);
     ngx_conf_log_error(NGX_LOG_INFO, cf, 0, "auth_spnego: force_realm = %i",
             conf->force_realm);
+    ngx_conf_log_error(NGX_LOG_INFO, cf, 0, "auth_spnego: save credentials = %i",
+            conf->save);
+    ngx_conf_log_error(NGX_LOG_INFO, cf, 0, "auth_spnego: temp_path@0x%p = %s",
+            conf->temp_path.data, conf->temp_path.data);
     if (NGX_CONF_UNSET_PTR != conf->auth_princs) {
         size_t ii = 0;
         ngx_str_t *auth_princs = conf->auth_princs->elts;
@@ -285,6 +326,51 @@ ngx_http_auth_spnego_merge_loc_conf(
 
     return NGX_CONF_OK;
 }
+
+    static ngx_int_t
+ngx_http_auth_preconf(
+        ngx_conf_t * cf)
+{
+    ngx_http_variable_t  *var, *v;
+
+    for (v = ngx_http_auth_spnego_vars; v->name.len; v++) {
+        var = ngx_http_add_variable(cf, &v->name, v->flags);
+        if (var == NULL) {
+            return NGX_ERROR;
+        }
+
+        var->get_handler = v->get_handler;
+        var->data = v->data;
+    }
+
+    return NGX_OK;
+}
+
+    static ngx_int_t
+ngx_http_auth_spnego_get_krb5ccname(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t                       *krb5ccname;
+    ngx_http_auth_spnego_ctx_t      *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_auth_spnego_module);
+    krb5ccname = &ctx->krb5ccname;
+
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    if (krb5ccname && krb5ccname->len <= 0) {
+	v->len = 0;
+	v->data = NULL;
+    } else {
+        v->len = krb5ccname->len - 1;
+        v->data = krb5ccname->data;
+    }
+
+    return NGX_OK;
+}
+
 
     static ngx_int_t
 ngx_http_auth_spnego_init(
@@ -495,6 +581,7 @@ ngx_http_auth_spnego_basic(
     krb5_error_code code;
     krb5_principal client = NULL;
     krb5_principal server = NULL;
+    krb5_keytab    keytab = NULL;
     krb5_creds creds;
     krb5_get_init_creds_opt *gic_options = NULL;
     int kret = 0;
@@ -503,7 +590,7 @@ ngx_http_auth_spnego_basic(
 
     code = krb5_init_context(&kcontext);
     if (code) {
-        spnego_debug0("Kerberos error: Cannot initialize kerberos context");
+        spnego_debug1("Kerberos error: Cannot initialize kerberos context: (%d)", code);
         return NGX_ERROR;
     }
 
@@ -527,6 +614,10 @@ ngx_http_auth_spnego_basic(
 
         ngx_snprintf(service.data, service.len, "%V/%V@%V%Z",
                 &alcf->srvcname, &host_name, &alcf->realm);
+    }
+
+    if (alcf->keytab.len) {
+        krb5_kt_resolve(kcontext, (const char *) alcf->keytab.data, &keytab);
     }
 
     kret = krb5_parse_name(kcontext, (const char *) service.data, &server);
@@ -642,8 +733,6 @@ ngx_http_auth_spnego_basic(
         spnego_error(NGX_ERROR);
     }
 
-    memset(&creds, 0, sizeof(creds));
-
     code = krb5_unparse_name(kcontext, client, &name);
     if (code) {
         spnego_log_error("Kerberos error: Cannot unparse username");
@@ -656,14 +745,17 @@ ngx_http_auth_spnego_basic(
     code = krb5_get_init_creds_password(kcontext, &creds, client,
                 (char *) r->headers_in.passwd.data,
                 NULL, NULL, 0, NULL, gic_options);
-
-    krb5_free_cred_contents(kcontext, &creds);
+    spnego_debug1("krb5_get_init_creds_password: %s",
+            (const char *) r->headers_in.passwd.data);
 
     if (code) {
         spnego_log_error("Kerberos error: Credentials failed");
         spnego_log_krb5_error(kcontext, code);
         spnego_error(NGX_DECLINED);
     }
+
+    krb5_free_cred_contents(kcontext, &creds);
+    spnego_debug0("krb5_free_cred_contents");
 
     /* Try to add the system realm to $remote_user if needed. */
     if (alcf->fqun && !ngx_strchr(r->headers_in.user.data, '@')) {
@@ -677,6 +769,7 @@ ngx_http_auth_spnego_basic(
 #else
         const char *realm = krb5_principal_get_realm(kcontext, client);
 #endif
+        spnego_debug1("Realm is %s", &realm);
         if (realm) {
             new_user.len = r->headers_in.user.len + 1 + ngx_strlen(realm);
             new_user.data = ngx_palloc(r->pool, new_user.len);
@@ -693,9 +786,11 @@ ngx_http_auth_spnego_basic(
     }
 
     spnego_debug1("Setting $remote_user to %V", &r->headers_in.user);
-    if (ngx_http_auth_spnego_set_bogus_authorization(r) != NGX_OK)
+    /*
+    if (ngx_http_auth_spnego_set_bogus_authorization(r) != NGX_OK) {
         spnego_log_error("Failed to set $remote_user");
-
+    }
+    */
     spnego_debug0("ngx_http_auth_spnego_basic: returning NGX_OK");
 
     ret = NGX_OK;
@@ -768,9 +863,166 @@ ngx_http_auth_spnego_set_bogus_authorization(
     r->headers_in.authorization->value.len = final.len;
     r->headers_in.authorization->value.data = final.data;
 
-    spnego_debug0("ngx_http_auth_spnego_set_bogus_authorization: bogus user set");
+    spnego_debug2("ngx_http_auth_spnego_set_bogus_authorization: bogus user set (%z symbols): %V", r->headers_in.user.len, &r->headers_in.user);
+    spnego_debug2("ngx_http_auth_spnego_set_bogus_authorization: authorization (%z symbols): %V", r->headers_in.authorization->value.len, &r->headers_in.authorization->value);
     return NGX_OK;
 }
+
+
+    static int
+create_krb5_ccache(krb5_context kcontext,
+                   ngx_http_request_t * r,
+                   ngx_http_auth_spnego_ctx_t      * ctx,
+                   ngx_http_auth_spnego_loc_conf_t * conf,
+                   krb5_principal princ,
+                   krb5_ccache *ccache)
+{
+    ngx_temp_file_t *tf;
+    krb5_error_code problem;
+    int             ret;
+    krb5_ccache     tmp_ccache = NULL;
+
+    // ctx = ngx_http_get_module_ctx(r, ngx_http_auth_spnego_module);
+
+    tf = ngx_pcalloc(r->pool, sizeof(ngx_temp_file_t));
+    if (tf == NULL) {
+        spnego_log_error("Not enough memory");
+        ret = NGX_ERROR;
+        goto end;
+    }
+
+    tf->path = ngx_pcalloc(r->pool, sizeof(ngx_path_t));
+    if (tf->path == NULL) {
+        ret = NGX_ERROR;
+        goto end;
+    }
+    tf->path->name.len = conf->temp_path.len;
+    tf->path->name.data = ngx_pcalloc(r->pool, conf->temp_path.len);
+    if (tf->path->name.data == NULL) {
+        ret = NGX_ERROR;
+        goto end;
+    }
+    spnego_debug1("ccname path len: %z", tf->path->name.len);
+    ngx_snprintf(tf->path->name.data, tf->path->name.len, "%V", &conf->temp_path);
+    spnego_debug1("ccname path: %V", &tf->path->name);
+
+    tf->file.fd = NGX_INVALID_FILE;
+    tf->file.log = r->connection->log;
+    tf->pool = r->pool;
+    tf->warn = "a ccname kerberos request is buffered to a temporary file";
+    tf->log_level = r->request_body_file_log_level;
+    tf->persistent = 0; //r->request_body_in_persistent_file;
+    tf->clean = 1; //r->request_body_in_clean_file;
+
+    if (ngx_create_temp_file(&tf->file, tf->path, tf->pool, tf->persistent, tf->clean, tf->access) != NGX_OK) {
+        spnego_debug1("mkstemp() failed: %s", strerror(errno));
+        ret = NGX_ERROR;
+        goto end;
+    }
+    ctx->krb5ccname.len = strlen("FILE:") + tf->file.name.len + 1;
+    ctx->krb5ccname.data = ngx_pnalloc(r->pool, ctx->krb5ccname.len);
+    ngx_memset(ctx->krb5ccname.data, 0, ctx->krb5ccname.len);
+    ngx_snprintf(ctx->krb5ccname.data, ctx->krb5ccname.len, "FILE:%V", &tf->file.name);
+    spnego_debug1("kerberos file is created: %s", ctx->krb5ccname.data);
+
+    problem = krb5_cc_resolve(kcontext, (const char*)ctx->krb5ccname.data, &tmp_ccache);
+    if (problem) {
+        spnego_log_error("krb5_cc_resolve() failed");
+        spnego_log_krb5_error(kcontext, problem);
+        ret = NGX_ERROR;
+        goto end;
+    }
+    spnego_debug1("krb5_cc_resolve(): %s", ctx->krb5ccname.data);
+
+    problem = krb5_cc_initialize(kcontext, tmp_ccache, princ);
+    if (problem) {
+        spnego_debug1("Cannot initialize krb5 ccache %s: krb5_cc_initialize() failed", ctx->krb5ccname.data);
+        spnego_log_krb5_error(kcontext, problem);
+        ret = NGX_ERROR;
+        goto end;
+    }
+    spnego_debug0("krb5_cc_initialize(): executed");
+
+    *ccache = tmp_ccache;
+    tmp_ccache = NULL;
+
+    ret = NGX_OK;
+
+end:
+    if (tmp_ccache)
+        krb5_cc_destroy(kcontext, tmp_ccache);
+
+    return ret;
+}
+
+
+    static int
+store_gss_creds(
+        ngx_http_request_t * r,
+        ngx_http_auth_spnego_ctx_t      * ctx,
+        ngx_http_auth_spnego_loc_conf_t * conf,
+        char * princ_name,
+        gss_cred_id_t delegated_cred
+    )
+{
+    OM_uint32 maj_stat, min_stat;
+    krb5_principal princ = NULL;
+    krb5_ccache ccache = NULL;
+    krb5_error_code problem;
+    krb5_context context;
+    int ret = NGX_ERROR;
+
+    problem = krb5_init_context(&context);
+    if (problem) {
+        spnego_debug1("Kerberos error: Cannot initialize kerberos context: (%d)", problem);
+        goto end;
+    }
+
+    problem = krb5_parse_name(context, princ_name, &princ);
+    if (problem) {
+        spnego_log_error("Kerberos error: Unable to parse username");
+        spnego_debug1("username is %s.", (const char *) princ_name);
+        spnego_log_krb5_error(context, problem);
+        goto end;
+    }
+    spnego_debug1("Parsing username: %s", (const char *) princ_name);
+
+    problem = create_krb5_ccache(context, r, ctx, conf, princ, &ccache);
+    if (problem) {
+        spnego_log_error("Cannot create krb5 ccache");
+        spnego_log_krb5_error(context, problem);
+        goto end;
+    }
+    spnego_debug0("kerberos file init succeded");
+
+    if (delegated_cred != GSS_C_NO_CREDENTIAL) {
+        maj_stat = gss_krb5_copy_ccache(&min_stat, delegated_cred, ccache);
+        if (GSS_ERROR(maj_stat)) {
+            spnego_debug0("Cannot store delegated credential");
+            spnego_debug1("%s", get_gss_error(r->pool, min_stat, "gss_krb5_copy_ccache"));
+            goto end;
+        }
+        spnego_debug0("kerberos file is written: gss_krb5_copy_ccache() executed");
+    } else {
+        spnego_debug0("kerberos file is NOT written. Client didn't delegated us their credential");
+    }
+
+    krb5_cc_close(context, ccache);
+    ccache = NULL;
+    ret = NGX_OK;
+
+end:
+    if (princ) {
+        krb5_free_principal(context, princ);
+    }
+    if (ccache) {
+        krb5_cc_destroy(context, ccache);
+    }
+    krb5_free_context(context);
+
+    return ret;
+}
+
 
     static bool
 use_keytab(
@@ -816,9 +1068,10 @@ ngx_http_auth_spnego_auth_user_gss(
     ngx_int_t ret = NGX_DECLINED;
     u_char *pu;
     ngx_str_t spnego_token = ngx_null_string;
-    OM_uint32 major_status, minor_status, minor_status2;
+    OM_uint32 major_status, minor_status, minor_status2, ret_flags;
     gss_buffer_desc service = GSS_C_EMPTY_BUFFER;
     gss_name_t my_gss_name = GSS_C_NO_NAME;
+    gss_cred_id_t delegated_cred = GSS_C_NO_CREDENTIAL;
     gss_cred_id_t my_gss_creds = GSS_C_NO_CREDENTIAL;
     gss_buffer_desc input_token = GSS_C_EMPTY_BUFFER;
     gss_ctx_id_t gss_context = GSS_C_NO_CONTEXT;
@@ -883,14 +1136,23 @@ ngx_http_auth_spnego_auth_user_gss(
     input_token.length = ctx->token.len;
     input_token.value = (void *) ctx->token.data;
 
-    major_status = gss_accept_sec_context(&minor_status, &gss_context,
-            my_gss_creds, &input_token, GSS_C_NO_CHANNEL_BINDINGS, &client_name,
-            NULL, &output_token, NULL, NULL, NULL);
+    major_status = gss_accept_sec_context(&minor_status,
+                                          &gss_context,
+                                          my_gss_creds,
+                                          &input_token,
+                                          GSS_C_NO_CHANNEL_BINDINGS,
+                                          &client_name,
+                                          NULL,
+                                          &output_token,
+                                          &ret_flags,
+                                          NULL,
+                                          &delegated_cred);
     if (GSS_ERROR(major_status)) {
         spnego_debug1("%s", get_gss_error(
                     r->pool, minor_status, "gss_accept_sec_context() failed"));
         spnego_error(NGX_DECLINED);
     }
+    spnego_debug1("gss_accept_sec_context(): Client %s us their credential", (ret_flags & GSS_C_DELEG_FLAG) ? "delegated" : "didn't delegated");
 
     if (major_status & GSS_S_CONTINUE_NEEDED) {
         spnego_debug0("only one authentication iteration allowed");
@@ -943,12 +1205,26 @@ ngx_http_auth_spnego_auth_user_gss(
                 r->headers_in.user.len = ngx_strlen(r->headers_in.user.data);
             }
         }
+        spnego_debug1("Incoming user is %V", &r->headers_in.user);
+
+        /* KRB5CCNAME */
+        spnego_debug1("store_gss_creds(): save_credentials=%d", alcf->save);
+        if (alcf->save && delegated_cred != GSS_C_NO_CREDENTIAL) {
+            store_gss_creds(r, ctx, alcf, (char *)output_token.value, delegated_cred);
+            spnego_debug0("store_gss_creds(): executed");
+        } else {
+            ctx->krb5ccname.len = 1;
+            ctx->krb5ccname.data = ngx_pnalloc(r->pool, ctx->krb5ccname.len);
+            ngx_memset(ctx->krb5ccname.data, 0, ctx->krb5ccname.len);
+            // ngx_snprintf(ctx->krb5ccname.data, ctx->krb5ccname.len, "");
+        }
 
         /* this for the sake of ngx_http_variable_remote_user */
+        /* */
         if (ngx_http_auth_spnego_set_bogus_authorization(r) != NGX_OK) {
             spnego_log_error("Failed to set remote_user");
         }
-        spnego_debug1("user is %V", &r->headers_in.user);
+        /* */
     }
 
     gss_release_buffer(&minor_status, &output_token);
@@ -1032,7 +1308,7 @@ ngx_http_auth_spnego_handler(
                     spnego_debug0("Error setting headers");
                     return (ctx->ret = NGX_HTTP_INTERNAL_SERVER_ERROR);
                 }
-                return (ctx->ret = NGX_HTTP_UNAUTHORIZED);
+                return (ctx->ret = NGX_HTTP_FORBIDDEN);
             }
 
             if (!ngx_spnego_authorized_principal(r, &r->headers_in.user, alcf)) {
