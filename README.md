@@ -56,6 +56,8 @@ thing.
 * `auth_gss_realm`: Kerberos realm name.  If this is specified, the realm is only passed to the nginx variable $remote_user if it differs from this default.  To override this behavior, set *auth_gss_format_full* to 1 in your configuration.
 * `auth_gss_service_name`: service principal name to use when acquiring
   credentials.
+* `auth_gss_temp_path`: /tmp
+* fastcgi_param KRB5CCNAME $KRB5CCNAME;
 
 If you would like to authorize only a specific set of users, you can use the
 `auth_gss_authorized_principal` directive.  The configuration syntax supports
