@@ -1,3 +1,5 @@
+Author: Stanislav V Vyaliy <wisekaa03@gmail.com>
+Date:   Thu Apr 20 15:15:15 2017 +0300
     Added options:
         `auth_gss_save`
         `auth_gss_temp_path`
