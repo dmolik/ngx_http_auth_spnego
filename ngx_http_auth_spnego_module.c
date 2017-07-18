@@ -124,11 +124,12 @@ typedef struct {
     ngx_array_t *auth_princs;
 } ngx_http_auth_spnego_loc_conf_t;
 
-#define SPNEGO_NGX_CONF_FLAGS NGX_HTTP_MAIN_CONF\
-    | NGX_HTTP_SRV_CONF\
-| NGX_HTTP_LOC_CONF\
-| NGX_HTTP_LMT_CONF\
-| NGX_CONF_FLAG
+#define SPNEGO_NGX_CONF_FLAGS NGX_HTTP_MAIN_CONF    \
+                              | NGX_HTTP_SRV_CONF   \
+                              | NGX_HTTP_LOC_CONF   \
+                              | NGX_HTTP_LMT_CONF   \
+                              | NGX_HTTP_SIF_CONF   \
+                              | NGX_CONF_FLAG
 
 /* Module Directives */
 static ngx_command_t ngx_http_auth_spnego_commands[] = {
@@ -219,15 +220,17 @@ static ngx_http_variable_t  ngx_http_auth_spnego_vars[] = {
 
 /* Module Context */
 static ngx_http_module_t ngx_http_auth_spnego_module_ctx = {
-    ngx_http_auth_preconf, /* preconf */
-    ngx_http_auth_spnego_init, /* postconf */
-    NULL, /* create main conf (defaults) */
-    NULL, /* init main conf (what's in nginx.conf) */
-    NULL, /* create server conf */
-    NULL, /* merge with main */
+    ngx_http_auth_preconf,                  /* preconfiguration */
+    ngx_http_auth_spnego_init,              /* postconfiguration */
 
-    ngx_http_auth_spnego_create_loc_conf, /* create location conf */
-    ngx_http_auth_spnego_merge_loc_conf, /* merge with server */
+    NULL,                                   /* create main conf (defaults) */
+    NULL,                                   /* init main conf (what's in nginx.conf) */
+
+    NULL,                                   /* create server configuration */
+    NULL,                                   /* merge server configuration */
+
+    ngx_http_auth_spnego_create_loc_conf,   /* create location configuration */
+    ngx_http_auth_spnego_merge_loc_conf,    /* merge location configuration */
 };
 
 /* Module Definition */
